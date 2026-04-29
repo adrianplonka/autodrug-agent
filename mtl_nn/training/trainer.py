@@ -1,14 +1,22 @@
 """Training loop for the MTL ADMET network."""
 from __future__ import annotations
 
-from typing import Dict, Sequence
+from typing import Dict, Optional, Sequence, Union
 
 import torch
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from ..config import EPOCHS, LEARNING_RATE, WEIGHT_DECAY, TaskSpec
+from ..config import (
+    EPOCHS,
+    LEARNING_RATE,
+    USE_AMP,
+    WEIGHT_DECAY,
+    TaskSpec,
+    configure_cuda_runtime,
+    resolve_device,
+)
 from ..model import ADMET_MTL_Network
 from .loss import MaskedMultiTaskLoss
 
@@ -34,15 +42,27 @@ class Trainer:
         self,
         model: ADMET_MTL_Network,
         tasks: Sequence[TaskSpec],
-        device: torch.device | str = "cuda" if torch.cuda.is_available() else "cpu",
+        device: Optional[Union[torch.device, str]] = None,
         lr: float = LEARNING_RATE,
         weight_decay: float = WEIGHT_DECAY,
+        use_amp: bool = USE_AMP,
     ) -> None:
-        self.device = torch.device(device)
+        # Resolve device through the central config helper unless the caller
+        # forced one. configure_cuda_runtime() applies cuDNN/TF32 flags and is
+        # a no-op on CPU machines.
+        self.device = torch.device(device) if device is not None else resolve_device()
+        configure_cuda_runtime()
+        print(f"[trainer] using device: {self.device}")
+
         self.model = model.to(self.device)
         self.tasks = tuple(tasks)
         self.criterion = MaskedMultiTaskLoss(self.tasks).to(self.device)
         self.optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
+
+        # AMP: autocast + GradScaler, only meaningful on CUDA. On CPU we
+        # disable both so the loop runs unchanged in fp32.
+        self.use_amp: bool = use_amp and self.device.type == "cuda"
+        self.scaler: torch.cuda.amp.GradScaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
 
     # ------------------------------------------------------------------ epoch
     def _run_epoch(self, loader: DataLoader, train: bool) -> Dict[str, float]:
@@ -57,13 +77,19 @@ class Trainer:
                 targets = targets.to(self.device, non_blocking=True)
                 mask = mask.to(self.device, non_blocking=True)
 
-                preds = self.model(fps)
-                total_loss, per_task = self.criterion(preds, targets, mask)
+                # autocast wraps the forward pass in fp16/bf16 on CUDA when
+                # AMP is enabled; on CPU / when disabled it's a no-op.
+                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                    preds = self.model(fps)
+                    total_loss, per_task = self.criterion(preds, targets, mask)
 
                 if train:
                     self.optimizer.zero_grad(set_to_none=True)
-                    total_loss.backward()
-                    self.optimizer.step()
+                    # GradScaler handles fp16 underflow; with AMP off it
+                    # behaves like a plain backward()/step().
+                    self.scaler.scale(total_loss).backward()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
 
                 bs = fps.size(0)
                 total_meter.update(total_loss.item(), bs)

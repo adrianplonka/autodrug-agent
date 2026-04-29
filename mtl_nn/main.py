@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from sklearn.metrics import mean_squared_error, roc_auc_score
 
-from .config import EPOCHS, RANDOM_SEED, TASKS
+from .config import EPOCHS, RANDOM_SEED, TASKS, configure_cuda_runtime, resolve_device
 from .data import build_dataloaders, download_and_merge_tdc
 from .model import ADMET_MTL_Network
 from .training import Trainer
@@ -64,6 +64,9 @@ def evaluate(
 
 def main() -> None:
     _set_seed(RANDOM_SEED)
+    configure_cuda_runtime()
+    device = resolve_device()
+    print(f"[main] resolved device: {device}")
 
     df = download_and_merge_tdc(TASKS)
     train_loader, val_loader, test_loader = build_dataloaders(df, TASKS)
@@ -71,7 +74,7 @@ def main() -> None:
     model = ADMET_MTL_Network(TASKS)
     print(model)
 
-    trainer = Trainer(model, TASKS)
+    trainer = Trainer(model, TASKS, device=device)
     trainer.fit(train_loader, val_loader, epochs=EPOCHS)
 
     evaluate(model, test_loader, trainer.device)

@@ -26,6 +26,8 @@ from ..config import (
     TEST_FRACTION,
     VAL_FRACTION,
     TaskSpec,
+    resolve_device,
+    use_pin_memory,
 )
 from .featurizer import batch_smiles_to_fps
 
@@ -92,6 +94,9 @@ def build_dataloaders(
     rel_test = test_fraction / (val_fraction + test_fraction)
     idx_val, idx_test = train_test_split(idx_temp, test_size=rel_test, random_state=seed)
 
+    device = resolve_device()
+    pin = use_pin_memory(device)
+
     def make(indices: np.ndarray, shuffle: bool) -> DataLoader:
         ds = ADMETMultiTaskDataset(fps[indices], targets[indices], mask[indices])
         return DataLoader(
@@ -99,7 +104,7 @@ def build_dataloaders(
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=num_workers,
-            pin_memory=torch.cuda.is_available(),
+            pin_memory=pin,
         )
 
     return make(idx_train, True), make(idx_val, False), make(idx_test, False)
