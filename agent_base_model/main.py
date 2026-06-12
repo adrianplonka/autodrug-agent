@@ -32,6 +32,7 @@ from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
 from langgraph.prebuilt import create_react_agent
 from rdkit import Chem, RDLogger
+from rdkit.Chem import QED, Crippen, Descriptors, Lipinski
 from rdkit.Chem.Scaffolds import MurckoScaffold
 # ---------------------------------------------------------------------------
 # RDKit logging: set to WARNING so parse errors are visible in real time.
@@ -60,11 +61,16 @@ PUBCHEM_PUG_BASE: str = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
 PUBCHEM_TIMEOUT_SECONDS: int = 30  # generous timeout for slow connections
 # PubChem allows at most ~5 requests/second – keep a safety margin
 PUBCHEM_MIN_REQUEST_INTERVAL: float = 0.25
+# Drug-likeness gate: a molecule failing Lipinski's Rule of Five by 2+
+# criteria is rejected before the (slow) PubChem novelty check.
+MAX_LIPINSKI_VIOLATIONS: int = 1
 # CSV file for persisting discovered novel molecules (append mode)
 CSV_PATH: Path = Path(__file__).parent / "novel_molecules.csv"
 CSV_HEADERS: list[str] = [
     "timestamp", "smiles", "scaffold", "exact_match",
-    "analogs_90", "analogs_70", "scaffold_known", "verdict",
+    "analogs_90", "analogs_70", "scaffold_known",
+    "mw", "logp", "hbd", "hba", "tpsa", "rot_bonds", "qed",
+    "lipinski_violations", "verdict",
 ]
 # ===========================================================================
 #  CSV persistence – append novel molecules to a running log
@@ -103,12 +109,62 @@ def save_to_csv(
                 cell(report.get("close_analogs_90")),
                 cell(report.get("broad_analogs_70")),
                 cell(report.get("scaffold_known")),
+                cell(report.get("mw")),
+                cell(report.get("logp")),
+                cell(report.get("hbd")),
+                cell(report.get("hba")),
+                cell(report.get("tpsa")),
+                cell(report.get("rot_bonds")),
+                cell(report.get("qed")),
+                cell(report.get("lipinski_violations")),
                 verdict,
             ])
         discovered_smiles.add(smiles)
         logger.info("[CSV] Saved to %s", CSV_PATH)
     except OSError as exc:
         logger.error("[CSV] Failed to write: %s", exc)
+# ===========================================================================
+#  RDKit physicochemical properties & drug-likeness
+# ===========================================================================
+def compute_properties(mol: Chem.rdchem.Mol) -> dict[str, Any]:
+    """Compute key physicochemical descriptors and drug-likeness flags.
+
+    Returns the classic Lipinski Rule-of-Five inputs (MW, LogP, H-bond
+    donors/acceptors), the Veber oral-bioavailability descriptors (TPSA,
+    rotatable bonds), and the QED score (0–1, higher = more drug-like).
+    """
+    mw: float = Descriptors.MolWt(mol)
+    logp: float = Crippen.MolLogP(mol)
+    hbd: int = Lipinski.NumHDonors(mol)
+    hba: int = Lipinski.NumHAcceptors(mol)
+    tpsa: float = Descriptors.TPSA(mol)
+    rot_bonds: int = Descriptors.NumRotatableBonds(mol)
+    try:
+        qed: float = QED.qed(mol)
+    except Exception:  # QED can fail on exotic structures
+        qed = float("nan")
+    # Lipinski Rule of Five: drug-like when at most one criterion is broken
+    lipinski_flags = {
+        "MW>500": mw > 500,
+        "LogP>5": logp > 5,
+        "HBD>5": hbd > 5,
+        "HBA>10": hba > 10,
+    }
+    violations = [name for name, broken in lipinski_flags.items() if broken]
+    # Veber rules for oral bioavailability
+    veber_ok = rot_bonds <= 10 and tpsa <= 140
+    return {
+        "mw": round(mw, 1),
+        "logp": round(logp, 2),
+        "hbd": hbd,
+        "hba": hba,
+        "tpsa": round(tpsa, 1),
+        "rot_bonds": rot_bonds,
+        "qed": round(qed, 3) if qed == qed else "",  # NaN check
+        "lipinski_violations": len(violations),
+        "lipinski_failed": violations,
+        "veber_ok": veber_ok,
+    }
 # ===========================================================================
 #  PubChem helpers – rate-limited HTTP, identity and similarity lookups
 # ===========================================================================
@@ -329,7 +385,37 @@ def check_molecule(smiles: str) -> str:
             "a previous round of this session and is saved in the results file. "
             "ACTION REQUIRED: Generate a substantially DIFFERENT structure."
         )
+    # ---- Step 2: RDKit physicochemical properties & drug-likeness ---------
+    props: dict[str, Any] = compute_properties(mol)
+    logger.info(
+        "[Props] MW=%s LogP=%s HBD=%s HBA=%s TPSA=%s RotB=%s QED=%s "
+        "| Lipinski violations=%d %s | Veber=%s",
+        props["mw"], props["logp"], props["hbd"], props["hba"],
+        props["tpsa"], props["rot_bonds"], props["qed"],
+        props["lipinski_violations"],
+        props["lipinski_failed"] or "(none)",
+        "OK" if props["veber_ok"] else "FAIL",
+    )
+    # Drug-likeness gate: reject grossly non-drug-like molecules BEFORE the
+    # slow PubChem lookups (saves API budget – an undruggable "novel"
+    # molecule is worthless anyway).
+    if props["lipinski_violations"] > MAX_LIPINSKI_VIOLATIONS:
+        logger.info("[Props] ✘ Fails Lipinski Ro5 (%d violations) – skipping novelty",
+                    props["lipinski_violations"])
+        return (
+            f"Syntax check: OK. Canonical SMILES: {smiles}\n"
+            f"PROPERTIES: MW={props['mw']}, LogP={props['logp']}, "
+            f"HBD={props['hbd']}, HBA={props['hba']}, TPSA={props['tpsa']}, "
+            f"RotBonds={props['rot_bonds']}, QED={props['qed']}\n"
+            f"VERDICT: FAIL — Not drug-like: fails Lipinski's Rule of Five "
+            f"on {props['lipinski_violations']} criteria "
+            f"({', '.join(props['lipinski_failed'])}). "
+            f"Novelty was NOT checked.\n"
+            "ACTION REQUIRED: Redesign so that at most one Lipinski criterion "
+            "is broken (MW<=500, LogP<=5, H-bond donors<=5, acceptors<=10)."
+        )
     report: dict[str, Any] = _novelty_report(smiles)
+    report.update(props)  # fold descriptors into the report for CSV + output
     # ---- Determine verdict first -----------------------------------------
     # A None field means that check failed (network/throttling) – novelty
     # cannot be confirmed, so the molecule must never get a PASS by default.
@@ -383,6 +469,13 @@ def check_molecule(smiles: str) -> str:
     logger.info("║  Analogs ≥70%%  : %s compounds", fmt(report["broad_analogs_70"]))
     logger.info("║  Scaffold known: %s", fmt(report["scaffold_known"]))
     logger.info("║─────────────────────────────────────────────────────────────────────║")
+    logger.info("║  MW / LogP     : %s / %s", report["mw"], report["logp"])
+    logger.info("║  HBD / HBA     : %s / %s", report["hbd"], report["hba"])
+    logger.info("║  TPSA / RotB   : %s / %s", report["tpsa"], report["rot_bonds"])
+    logger.info("║  QED           : %s   (Lipinski viol.: %d, Veber: %s)",
+                report["qed"], report["lipinski_violations"],
+                "OK" if report["veber_ok"] else "FAIL")
+    logger.info("║─────────────────────────────────────────────────────────────────────║")
     logger.info("║  VERDICT       : %s — %s", verdict, reason)
     logger.info("╚═════════════════════════════════════════════════════════════════════╝")
     logger.info("")
@@ -400,6 +493,15 @@ def check_molecule(smiles: str) -> str:
     ]
     if report["scaffold_smiles"]:
         lines.append(f"  Murcko scaffold        : {report['scaffold_smiles']}")
+    lines.append(
+        f"  Properties (RDKit)     : MW={report['mw']}, LogP={report['logp']}, "
+        f"HBD={report['hbd']}, HBA={report['hba']}, TPSA={report['tpsa']}, "
+        f"RotBonds={report['rot_bonds']}, QED={report['qed']}"
+    )
+    lines.append(
+        f"  Drug-likeness          : Lipinski violations={report['lipinski_violations']}, "
+        f"Veber={'OK' if report['veber_ok'] else 'FAIL'}"
+    )
     lines.append("")
     if verdict == "ERROR":
         lines.append(f"VERDICT: ERROR — {reason}")
@@ -464,11 +566,19 @@ Step 1: GENERATE a heavily modified SMILES.
    - Adding a single halogen to the existing ring
    - Just replacing COOH with another simple acid
    - Only adding one methyl or ethyl group
+   KEEP THE MOLECULE DRUG-LIKE while doing this. Aim to respect Lipinski's
+   Rule of Five: molecular weight <= 500, LogP <= 5, H-bond donors <= 5,
+   H-bond acceptors <= 10. Avoid bloating the structure into something huge
+   or extremely greasy.
 
 Step 2: Call the `check_molecule` tool with your SMILES. It validates the
-   syntax AND checks novelty against PubChem in ONE step.
+   syntax, computes drug-likeness properties (Lipinski Ro5, Veber, QED),
+   AND checks novelty against PubChem — all in ONE step.
    - If it returns a syntax ERROR, fix the SMILES and call it again.
-   - If VERDICT: FAIL, go back to Step 1 with a MORE RADICAL modification.
+   - If VERDICT: FAIL because the molecule is NOT drug-like, redesign it to
+     respect Lipinski's Rule of Five, then call check_molecule again.
+   - If VERDICT: FAIL (already known / too many analogs), go back to Step 1
+     with a MORE RADICAL modification.
    - If VERDICT: ERROR (PubChem unreachable), call check_molecule again
      with the SAME SMILES. Never treat an ERROR as novelty.
    - If VERDICT: PASS, proceed to Step 3.
