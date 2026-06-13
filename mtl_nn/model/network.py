@@ -23,7 +23,6 @@ from typing import Dict, List, Sequence, Tuple
 
 import torch
 import torch.nn as nn
-import numpy as np
 
 from ..config import (
     DROPOUT,
@@ -111,37 +110,47 @@ class ADMET_MTL_Network(nn.Module):
             out[spec.name] = torch.sigmoid(y) if spec.task_type == "classification" else y
         return out
 
+    @torch.no_grad()
+    def predict_mc_dropout(
+        self,
+        x: torch.Tensor,
+        n_samples: int = 10,
+    ) -> Dict[str, Tuple[torch.Tensor, torch.Tensor]]:
+        """Monte Carlo Dropout: ``n_samples`` stochastic forward passes.
 
-def predict_mc_dropout(
-    self,
-    x: torch.Tensor,
-    n_samples: int = 50,
-) -> Dict[str, tuple[float, float]]:
-    """
-    Monte Carlo Dropout: N forward passów z włączonym dropoutem.
-    Zwraca {task: (mean, std)} — std to miara niepewności modelu.
-    """
-    # eval mode ale dropout włączony
-    self.eval()
-    for module in self.modules():
-        if isinstance(module, nn.Dropout):
-            module.train()
+        Keeps the whole network in eval mode *except* the Dropout layers,
+        which are re-enabled so each pass samples a different sub-network.
+        The spread across passes is an estimate of the model's (epistemic)
+        uncertainty.
 
-    results: Dict[str, List[float]] = {spec.name: [] for spec in self.tasks}
+        Works on a full batch: returns ``{task: (mean, std)}`` where ``mean``
+        and ``std`` are tensors of shape ``(B,)`` aligned with the input rows.
+        Classification heads are sigmoid'd before aggregation, matching
+        ``predict``. ``std`` uses the population definition so a single sample
+        yields 0 rather than NaN.
+        """
+        was_training = self.training
+        self.eval()
+        # Re-enable only the Dropout layers; BatchNorm/LayerNorm stay in eval.
+        for module in self.modules():
+            if isinstance(module, nn.Dropout):
+                module.train()
 
-    with torch.no_grad():
-        for _ in range(n_samples):
+        # Collect per-pass outputs, then stack to (n_samples, B) per task.
+        samples: Dict[str, List[torch.Tensor]] = {spec.name: [] for spec in self.tasks}
+        for _ in range(max(1, n_samples)):
             raw = self.forward(x)
             for spec in self.tasks:
                 val = raw[spec.name]
                 if spec.task_type == "classification":
                     val = torch.sigmoid(val)
-                results[spec.name].append(float(val[0].cpu()))
+                samples[spec.name].append(val.detach().float().cpu())
 
-    # przywróć pełny eval mode
-    self.eval()
+        # Restore the module's original train/eval state (dropout off again).
+        self.train(was_training)
 
-    return {
-        name: (float(np.mean(vals)), float(np.std(vals)))
-        for name, vals in results.items()
-    }
+        out: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
+        for spec in self.tasks:
+            stacked = torch.stack(samples[spec.name], dim=0)  # (n_samples, B)
+            out[spec.name] = (stacked.mean(dim=0), stacked.std(dim=0, unbiased=False))
+        return out
