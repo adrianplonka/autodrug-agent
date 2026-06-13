@@ -58,6 +58,9 @@ def evaluate(
                 # Single-class split — AUC is undefined.
                 print(f"  - {spec.name:<10s} ROC-AUC = n/a (single class)  (n={len(y_true)})")
         else:
+            if spec.name == "half_life":
+                y_pred = np.expm1(y_pred)
+                y_true = np.expm1(y_true)
             rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
             print(f"  - {spec.name:<10s} RMSE    = {rmse:.4f}  (n={len(y_true)})")
 

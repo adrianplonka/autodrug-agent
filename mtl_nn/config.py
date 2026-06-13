@@ -9,7 +9,7 @@ so adding/removing a task is a one-line change here.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Tuple
+from typing import Dict, Literal, Optional, Tuple
 
 import torch
 
@@ -19,19 +19,22 @@ DeviceMode = Literal["auto", "cuda", "cpu"]
 
 @dataclass(frozen=True)
 class TaskSpec:
-    name: str             # Human-readable column name used in merged DataFrame
-    tdc_name: str         # Exact dataset name in TDC
-    tdc_group: str        # 'ADME' or 'Tox' — selects the tdc.single_pred class
-    task_type: TaskType   # Drives loss function and output activation
+    name: str                        # column name in merged DataFrame
+    task_type: TaskType              # drives loss + output activation
+    tdc_name: Optional[str] = None  # exact TDC dataset name (None for external sources)
+    tdc_group: Optional[str] = None # 'ADME' or 'Tox'
 
 
-# 5 ADMET endpoints — one per ADMET letter.
 TASKS: Tuple[TaskSpec, ...] = (
-    TaskSpec("caco2",     "Caco2_Wang",      "ADME", "regression"),     # A
-    TaskSpec("bbb",       "BBB_Martins",     "ADME", "classification"), # D
-    TaskSpec("cyp3a4",    "CYP3A4_Veith",    "ADME", "classification"), # M
-    TaskSpec("half_life", "Half_Life_Obach", "ADME", "regression"),     # E
-    TaskSpec("herg",      "hERG",            "Tox",  "classification"), # T
+    TaskSpec("caco2",      "regression",     "Caco2_Wang",      "ADME"),
+    TaskSpec("bbb",        "classification", "BBB_Martins",     "ADME"),
+    TaskSpec("cyp3a4",     "classification", "CYP3A4_Veith",    "ADME"),
+    TaskSpec("half_life",  "regression",     "Half_Life_Obach", "ADME"),
+    TaskSpec("herg",       "classification", "hERG",            "Tox"),
+    TaskSpec("hum_mic_cl", "regression"),
+    TaskSpec("ppb",        "regression"),
+    TaskSpec("logd",       "regression"),
+    TaskSpec("water_sol",  "regression"),
 )
 
 
@@ -42,16 +45,28 @@ FP_NBITS: int = 2048
 # --- Model ------------------------------------------------------------------
 SHARED_HIDDEN_DIMS: Tuple[int, ...] = (1024, 512, 256)
 HEAD_HIDDEN_DIM: int = 64
-DROPOUT: float = 0.2
+DROPOUT: float = 0.1
 
 # --- Training ---------------------------------------------------------------
 BATCH_SIZE: int = 256
-EPOCHS: int = 30
-LEARNING_RATE: float = 1e-3
+EPOCHS: int = 100
+LEARNING_RATE: float = 3e-4
 WEIGHT_DECAY: float = 1e-4
 VAL_FRACTION: float = 0.1
 TEST_FRACTION: float = 0.1
-RANDOM_SEED: int = 67
+RANDOM_SEED: int = 42
+
+TASK_WEIGHTS: Dict[str, float] = {
+    "caco2":      1.0,
+    "bbb":        1.0,
+    "cyp3a4":     0.5,
+    "half_life":  4.0,
+    "herg":       3.0,
+    "hum_mic_cl": 1.0,
+    "ppb":        1.0,
+    "logd":       0.5,
+    "water_sol":  0.5,
+}
 
 # --- CUDA / device ----------------------------------------------------------
 # DEVICE_MODE controls hardware selection:

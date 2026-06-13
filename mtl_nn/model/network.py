@@ -34,10 +34,10 @@ from ..config import (
 
 
 def _mlp_block(in_dim: int, out_dim: int, dropout: float) -> nn.Sequential:
-    """Linear -> BatchNorm -> ReLU -> Dropout."""
+    """Linear -> LayerNorm -> ReLU -> Dropout."""
     return nn.Sequential(
         nn.Linear(in_dim, out_dim),
-        nn.BatchNorm1d(out_dim),
+        nn.LayerNorm(out_dim),
         nn.ReLU(inplace=True),
         nn.Dropout(dropout),
     )
