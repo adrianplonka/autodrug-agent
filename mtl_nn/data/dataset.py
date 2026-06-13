@@ -80,13 +80,10 @@ def build_dataloaders(
     test_fraction: float = TEST_FRACTION,
     seed: int = RANDOM_SEED,
     num_workers: int = 0,
-) -> Tuple[DataLoader, DataLoader, DataLoader]:
-    """Featurize, split (train / val / test), and wrap in DataLoaders."""
+) -> Tuple[DataLoader, DataLoader, DataLoader, np.ndarray]:  # dodane np.ndarray
     fps, targets, mask = _featurize_frame(df, tasks)
-    print(f"[dataset] featurized {fps.shape[0]} / {len(df)} molecules (rest unparseable)")
+    print(f"[dataset] featurized {fps.shape[0]} / {len(df)} molecules")
 
-    # Two-stage split keeps the implementation independent of sklearn version
-    # quirks around three-way splits.
     idx = np.arange(fps.shape[0])
     idx_train, idx_temp = train_test_split(
         idx, test_size=val_fraction + test_fraction, random_state=seed
@@ -94,17 +91,17 @@ def build_dataloaders(
     rel_test = test_fraction / (val_fraction + test_fraction)
     idx_val, idx_test = train_test_split(idx_temp, test_size=rel_test, random_state=seed)
 
+    # Zachowaj SMILES treningowe do Tanimoto
+    smiles_array = np.array(df["smiles"].tolist())
+    _, valid_idx = batch_smiles_to_fps(df["smiles"].tolist(), radius=FP_RADIUS, n_bits=FP_NBITS)
+    train_smiles = smiles_array[valid_idx][idx_train].tolist()
+
     device = resolve_device()
     pin = use_pin_memory(device)
 
     def make(indices: np.ndarray, shuffle: bool) -> DataLoader:
         ds = ADMETMultiTaskDataset(fps[indices], targets[indices], mask[indices])
-        return DataLoader(
-            ds,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            num_workers=num_workers,
-            pin_memory=pin,
-        )
+        return DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
+                         num_workers=num_workers, pin_memory=pin)
 
-    return make(idx_train, True), make(idx_val, False), make(idx_test, False)
+    return make(idx_train, True), make(idx_val, False), make(idx_test, False), train_smiles

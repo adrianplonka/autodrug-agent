@@ -23,6 +23,7 @@ from typing import Dict, List, Sequence, Tuple
 
 import torch
 import torch.nn as nn
+import numpy as np
 
 from ..config import (
     DROPOUT,
@@ -109,3 +110,38 @@ class ADMET_MTL_Network(nn.Module):
             y = raw[spec.name]
             out[spec.name] = torch.sigmoid(y) if spec.task_type == "classification" else y
         return out
+
+
+def predict_mc_dropout(
+    self,
+    x: torch.Tensor,
+    n_samples: int = 50,
+) -> Dict[str, tuple[float, float]]:
+    """
+    Monte Carlo Dropout: N forward passów z włączonym dropoutem.
+    Zwraca {task: (mean, std)} — std to miara niepewności modelu.
+    """
+    # eval mode ale dropout włączony
+    self.eval()
+    for module in self.modules():
+        if isinstance(module, nn.Dropout):
+            module.train()
+
+    results: Dict[str, List[float]] = {spec.name: [] for spec in self.tasks}
+
+    with torch.no_grad():
+        for _ in range(n_samples):
+            raw = self.forward(x)
+            for spec in self.tasks:
+                val = raw[spec.name]
+                if spec.task_type == "classification":
+                    val = torch.sigmoid(val)
+                results[spec.name].append(float(val[0].cpu()))
+
+    # przywróć pełny eval mode
+    self.eval()
+
+    return {
+        name: (float(np.mean(vals)), float(np.std(vals)))
+        for name, vals in results.items()
+    }

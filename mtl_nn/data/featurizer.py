@@ -59,3 +59,43 @@ def batch_smiles_to_fps(
     if not fps:
         return np.zeros((0, n_bits), dtype=np.float32), []
     return np.stack(fps, axis=0), valid_indices
+
+def smiles_to_rdkit_fp(
+    smiles: str,
+    radius: int = 2,
+    n_bits: int = 2048,
+) -> Optional[Chem.DataStructs.ExplicitBitVect]:
+    """Zwraca RDKit ExplicitBitVect (potrzebny do Tanimoto) lub None."""
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+    return AllChem.GetMorganFingerprintAsBitVect(mol, radius=radius, nBits=n_bits)
+
+
+def extract_train_fps(
+    smiles_list: Iterable[str],
+    radius: int = 2,
+    n_bits: int = 2048,
+) -> List[Chem.DataStructs.ExplicitBitVect]:
+    """Zbiera RDKit fingerprinity dla zbioru treningowego do Tanimoto check."""
+    fps = []
+    for smi in smiles_list:
+        fp = smiles_to_rdkit_fp(smi, radius=radius, n_bits=n_bits)
+        if fp is not None:
+            fps.append(fp)
+    print(f"[domain] zapisano {len(fps)} fingerprintów treningowych")
+    return fps
+
+
+def tanimoto_max_similarity(
+    smiles: str,
+    train_fps: List[Chem.DataStructs.ExplicitBitVect],
+    radius: int = 2,
+    n_bits: int = 2048,
+) -> Optional[float]:
+    """Liczy max Tanimoto similarity nowej cząsteczki do zbioru treningowego."""
+    fp = smiles_to_rdkit_fp(smiles, radius=radius, n_bits=n_bits)
+    if fp is None:
+        return None
+    similarities = Chem.DataStructs.BulkTanimotoSimilarity(fp, train_fps)
+    return float(max(similarities))

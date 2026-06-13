@@ -9,12 +9,17 @@ from __future__ import annotations
 import numpy as np
 import torch
 from sklearn.metrics import mean_squared_error, roc_auc_score
+import pandas as pd
+from pathlib import Path
 
 from .config import EPOCHS, RANDOM_SEED, TASKS, configure_cuda_runtime, resolve_device
 from .data import build_dataloaders, download_and_merge_tdc
 from .model import ADMET_MTL_Network
 from .training import Trainer
+from .data.featurizer import extract_train_fps, tanimoto_max_similarity
 
+TANIMOTO_THRESHOLD = 0.4
+MC_SAMPLES = 50
 
 def _set_seed(seed: int) -> None:
     np.random.seed(seed)
@@ -65,6 +70,59 @@ def evaluate(
             print(f"  - {spec.name:<10s} RMSE    = {rmse:.4f}  (n={len(y_true)})")
 
 
+
+def predict_with_domain_check(
+    model: ADMET_MTL_Network,
+    smiles_list: list[str],
+    train_fps: list,
+    device: torch.device,
+    threshold: float = TANIMOTO_THRESHOLD,
+    n_mc_samples: int = MC_SAMPLES,
+) -> None:
+    print(f"\n[predict] predykcja dla {len(smiles_list)} cząsteczek")
+    print(f"[predict] próg Tanimoto: {threshold} | MC samples: {n_mc_samples}\n")
+
+    for smi in smiles_list:
+        # Tanimoto check
+        max_sim = tanimoto_max_similarity(smi, train_fps)
+        if max_sim is None:
+            print(f"  {smi}: nieprawidłowy SMILES\n")
+            continue
+
+        in_domain = max_sim >= threshold
+        domain_str = "✓ w domenie" if in_domain else "⚠ POZA DOMENĄ"
+
+        # Fingerprint → tensor
+        from .data.featurizer import smiles_to_morgan_fp
+        fp_arr = smiles_to_morgan_fp(smi)
+        if fp_arr is None:
+            continue
+        fp_tensor = torch.tensor(fp_arr).unsqueeze(0).to(device)
+
+        # MC Dropout predykcja
+        mc_results = model.predict_mc_dropout(fp_tensor, n_samples=n_mc_samples)
+
+        # Wypisz
+        print(f"  SMILES: {smi}")
+        print(f"  Tanimoto max: {max_sim:.3f}  {domain_str}")
+        print(f"  {'Task':<12s}  {'Mean':>8s}  {'±Std':>8s}  Pewność")
+        print(f"  {'-'*48}")
+        for spec in model.tasks:
+            mean, std = mc_results[spec.name]
+            if spec.name == "half_life":
+                mean = float(np.expm1(mean))
+            if std < 0.05:
+                confidence = "wysoka"
+            elif std < 0.15:
+                confidence = "srednia"
+            else:
+                confidence = "niska"
+            unit = "P=" if spec.task_type == "classification" else "  "
+            print(f"  {spec.name:<12s}: {unit}{mean:>7.4f}  ±{std:.4f}  {confidence}")
+        print()
+
+
+
 def main() -> None:
     _set_seed(RANDOM_SEED)
     configure_cuda_runtime()
@@ -72,7 +130,7 @@ def main() -> None:
     print(f"[main] resolved device: {device}")
 
     df = download_and_merge_tdc(TASKS)
-    train_loader, val_loader, test_loader = build_dataloaders(df, TASKS)
+    train_loader, val_loader, test_loader, train_smiles = build_dataloaders(df, TASKS)
 
     model = ADMET_MTL_Network(TASKS)
     print(model)
@@ -81,6 +139,18 @@ def main() -> None:
     trainer.fit(train_loader, val_loader, epochs=EPOCHS)
 
     evaluate(model, test_loader, trainer.device)
+
+    # Tanimoto — pobierz SMILES treningowe z loadera
+    train_smiles = df.iloc[train_loader.dataset.indices]["smiles"].tolist()
+    train_fps = extract_train_fps(train_smiles)
+
+    # Predykcja na nowych cząsteczkach
+    novel_path = Path(__file__).parent.parent / "agent_base_model" / "novel_molecules.csv"
+    novel_df = pd.read_csv(novel_path)
+    new_smiles = novel_df["smiles"].tolist()
+
+    print(f"[predict] wczytano {len(new_smiles)} nowych cząsteczek")
+    predict_with_domain_check(model, new_smiles, train_fps, device)
 
 
 if __name__ == "__main__":
