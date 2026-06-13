@@ -140,6 +140,10 @@ def main() -> None:
 
     evaluate(model, test_loader, trainer.device)
 
+    save_path = Path(__file__).parent / "model_weights.pt"
+    torch.save(model.state_dict(), save_path)
+    print(f"[main] wagi zapisane: {save_path}")
+
     # Tanimoto — pobierz SMILES treningowe z loadera
     train_smiles = df.iloc[train_loader.dataset.indices]["smiles"].tolist()
     train_fps = extract_train_fps(train_smiles)
