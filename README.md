@@ -86,15 +86,13 @@ autodrug-agent/                       # ← git repository root (this README liv
 │   ├── mol12_COX2_pocket.png         #   rendered COX-2 binding pose
 │   └── cand1_EGFR_pocket.png         #   rendered EGFR binding pose
 │
-├── results/                          # generated outputs + analysis
-│   ├── novel_molecules_admet.csv     #   Path A candidates + ADMET preds + domain flags
-│   ├── agent_candidates.csv          #   Path B (EGFR) candidates, validated
-│   ├── agent_candidates_admet.csv    #   Path B candidates + ADMET preds + domain flags
-│   ├── agent_candidates_shortlist.csv#   ranked, in-domain EGFR leads → docking input
-│   ├── analysis_visualization.ipynb  #   plots: ADMET distributions, uncertainty, domain, safety
-│   └── *.png                         #   exported figures (agent_* and novel_* sets)
-│
-└── data/                             # cached TDC datasets (*.tab) - auto-downloaded, not committed
+└── results/                          # generated outputs + analysis
+    ├── novel_molecules_admet.csv     #   Path A candidates + ADMET preds + domain flags
+    ├── agent_candidates.csv          #   Path B (EGFR) candidates, validated
+    ├── agent_candidates_admet.csv    #   Path B candidates + ADMET preds + domain flags
+    ├── agent_candidates_shortlist.csv#   ranked, in-domain EGFR leads → docking input
+    ├── analysis_visualization.ipynb  #   plots: ADMET distributions, uncertainty, domain, safety
+    └── *.png                         #   exported figures (agent_* and novel_* sets)
 ```
 
 > **Note - trained weights are not committed.** Training (`mtl_nn/main.py`)
