@@ -57,9 +57,10 @@ autodrug-agent/                       # ← git repository root (this README liv
 │   ├── main.py                       #   qwen3.5:4b (Ollama) + check_molecule tool
 │   └── novel_molecules.csv           #   sample of validated agent output
 │
-├── agent_fine_tuned/                 # Stage 1 · Path B - fine-tuned SMILES generator
-│   ├── stage2_fine_tuning.ipynb      #   QLoRA + SFT of Qwen2.5-3B on EGFR actives (Kaggle)
-│   └── requirements.txt              #   fine-tuning deps (transformers/peft/trl/bitsandbytes…)
+├── agent_fine_tuned/                 # Stage 1 · Path B - fine-tuned generator + agent
+│   ├── stage1_fine_tuning.ipynb      #   QLoRA SMILES-grammar fine-tune of Qwen2.5-3B (~25k ChEMBL)
+│   ├── stage2_fine_tuning.ipynb      #   Stage-2 EGFR specialization → qwen25_3b_smiles_egfr_lora
+│   └── orchestrator-and-fine-tuned-generator.ipynb   # ReAct agent: qwen2.5:7b (Ollama) drives the fine-tuned generator
 │
 ├── mtl_nn/                           # Stage 3 · ADMET Multi-Task Learning network
 │   ├── config.py                     #   task registry + hyperparameters (single source of truth)
@@ -111,16 +112,26 @@ autodrug-agent/                       # ← git repository root (this README liv
   ibuprofen-like NSAIDs. A single combined `check_molecule` tool enforces
   RDKit validation + PubChem novelty in code (small models reliably skip the
   second step of a two-tool workflow). Output → `agent_base_model/novel_molecules.csv`.
-- **Path B** (`agent_fine_tuned/stage2_fine_tuning.ipynb`): **Qwen2.5-3B**
-  specialised with **QLoRA** (4-bit NF4 + LoRA, TRL `SFTTrainer`) in two stages
-  — first a broad SMILES-grammar adapter, then this **Stage 2** notebook that
-  continues training on **EGFR (CHEMBL203)** actives (IC50/Ki/Kd < 1000 nM,
-  pulled from ChEMBL and cleaned with RDKit to ~5.8k unique SMILES). It produces
-  a LoRA adapter (`qwen25_3b_smiles_egfr_lora`); test generation reaches ~70 %
-  validity / ~60 % EGFR-like scaffold. The committed notebook is the Stage-2
-  step (it starts from a Stage-1 grammar adapter supplied as input and was run on
-  a Kaggle T4 GPU). Its validated candidates are saved to
-  `results/agent_candidates.csv` and feed Stages 3-4.
+- **Path B** (`agent_fine_tuned/`): a **fine-tuned**, EGFR-targeted generator
+  driven by its own agent - the trainable counterpart to Path A. Three Kaggle
+  notebooks (developed on 2× T4):
+  - `stage1_fine_tuning.ipynb` - **QLoRA** (4-bit NF4 + LoRA `r=32`, TRL
+    `SFTTrainer`) fine-tune of **Qwen2.5-3B** on ~25k broad ChEMBL SMILES to
+    learn valid SMILES grammar → `qwen25_3b_smiles_lora` adapter.
+  - `stage2_fine_tuning.ipynb` - **Stage 2** continues from that adapter and
+    specialises on **EGFR (CHEMBL203)** actives (IC50/Ki/Kd < 1000 nM, ~5.8k
+    cleaned SMILES) → `qwen25_3b_smiles_egfr_lora` (~70 % valid / ~60 %
+    EGFR-like scaffold).
+  - `orchestrator-and-fine-tuned-generator.ipynb` - a **ReAct** agent (LangGraph)
+    where a **qwen2.5:7b** orchestrator (Ollama, reliable native tool-calling)
+    drives the fine-tuned generator through three combined tools:
+    `generate_candidates` (generate + RDKit-validate), `analyze_and_rank`
+    (drug-likeness + Lipinski + QED ranking, auto-slims too-heavy hits via BRICS,
+    saves to CSV) and `edit_molecule`. A final selection step ranks by
+    QED × Tanimoto similarity to known EGFR inhibitors (gefitinib / erlotinib /
+    osimertinib) and flags PAINS / BRENK structural alerts.
+
+  Output → `results/agent_candidates.csv`, which feeds Stages 3-4.
 
 ### Stage 2 - Validation (`check_molecule`)
 Every SMILES passes through, in order: RDKit parse/canonicalize → descriptor
@@ -170,7 +181,7 @@ the erlotinib control −7.12.
 - **Generative AI & Agents:** LangChain / LangGraph, Ollama (local Qwen models)
 - **LLM fine-tuning:** Hugging Face Transformers, PEFT (LoRA), TRL (SFT),
   bitsandbytes (4-bit), ChEMBL web client
-- **Cheminformatics:** RDKit, PubChem PUG REST API
+- **Cheminformatics:** RDKit (descriptors, QED, BRICS, PAINS/BRENK alerts), PubChem PUG REST API
 - **Machine Learning:** PyTorch (MTL network + MC-Dropout), TDC + PharmaBench data
 - **Docking & visualization:** smina / AutoDock Vina, OpenBabel, PyMOL
 
@@ -186,9 +197,11 @@ pip install langchain langchain-ollama langgraph requests   # Stage 1 agent
 ollama pull qwen3.5:4b
 python agent_base_model/main.py            # → agent_base_model/novel_molecules.csv
 
-# 2b. Stage 1 · Path B - fine-tune the SMILES generator (GPU; run on Kaggle/Colab)
+# 2b. Stage 1 · Path B - fine-tuned generator + agent (GPU; developed on Kaggle 2× T4)
 #     deps: pip install -r agent_fine_tuned/requirements.txt
-#     then run agent_fine_tuned/stage2_fine_tuning.ipynb → qwen25_3b_smiles_egfr_lora
+#     stage1 → stage2 notebooks build the LoRA adapter (qwen25_3b_smiles_egfr_lora),
+#     then orchestrator-and-fine-tuned-generator.ipynb runs the discovery agent
+#     → results/agent_candidates.csv
 
 # 3. Stage 3 - train the MTL network (writes mtl_nn/model_weights.pt)
 python -m mtl_nn.main
